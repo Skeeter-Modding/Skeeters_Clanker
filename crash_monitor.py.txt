@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""
+Arma Reforger Server Crash Monitor
+Standalone script that monitors Docker containers for crashes/restarts
+and sends alerts via Discord webhook.
+
+Run separately from the main bot for independent monitoring.
+"""
+
+import docker
+import requests
+import time
+import logging
+import os
+import gc
+from datetime import datetime
+from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Configuration
+WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', 'https://discord.com/api/webhooks/1452215031562506261/H_2R-QA7pcufaZgSX6ED2e8l4HshXZk_T-Ny-vwo9ncSNj8VXDle1QNb1-K98cfSgv1M')
+CHECK_INTERVAL = 30  # seconds between status checks
+LOG_SCAN_LINES = 100  # lines to scan for crash indicators
+ALERT_COOLDOWN = 300  # seconds before alerting again for same server (5 min)
+
+# Server mappings - same as bot.py
+SERVERS = {
+    "ttt3": "6a7a992256a5db593d442df6cd72403eaf0821094c83b89f6287a6c06a89dbe3",
+    "ttt1": "29046d9421f26c0c05aa027b9d5a6fa026fc03e689cf8321f45d30f226079b8c",
+    "ttt2": "8ad4e7e7d1a16536d1a171570634d9a1249c428b312d60fc31d093cea4040191",
+}
+
+# =============================================================================
+# CRASH DETECTION KEYWORDS
+# These are the only real crash indicators for Arma Reforger
+# =============================================================================
+
+CRASH_KEYWORDS = [
+    "Application crash",  # Standard crash message
+    "malloc()",           # Memory allocation failure (silent crash)
+]
+
+# =============================================================================
+# Logging setup
+# =============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('crash_monitor.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Discord webhook functions
+# =============================================================================
+
+def send_webhook(title: str, description: str, color: int = 0xFF0000, 
+                 fields: Optional[list] = None, server_name: str = None) -> bool:
+    """Send a Discord webhook message"""
+    if WEBHOOK_URL == 'YOUR_WEBHOOK_URL_HERE':
+        logger.warning("Webhook URL not configured! Set DISCORD_WEBHOOK_URL in .env")
+        return False
+    
+    embed = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "timestamp": datetime.utcnow().isoformat(),
+        "footer": {"text": "Skeeters Crash Monitor"}
+    }
+    
+    if fields:
+        embed["fields"] = fields
+    
+    if server_name:
+        embed["author"] = {"name": f"Server: {server_name.upper()}"}
+    
+    payload = {"embeds": [embed]}
+    
+    try:
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"Webhook sent: {title}")
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to send webhook: {e}")
+        return False
+
+
+def alert_crash(server_name: str, crash_line: str, keyword: str):
+    """Alert when a crash is detected"""
+    if len(crash_line) > 500:
+        crash_line = crash_line[:500] + "..."
+    
+    send_webhook(
+        title=f"💥 CRASH: {server_name.upper()}",
+        description="Server crashed! Dashboard will auto-restart.",
+        color=0xFF0000,  # Red
+        fields=[
+            {"name": "Crash Type", "value": f"`{keyword}`", "inline": True},
+            {"name": "Time", "value": datetime.now().strftime("%H:%M:%S"), "inline": True},
+            {"name": "Log Output", "value": f"```{crash_line}```", "inline": False},
+        ],
+        server_name=server_name
+    )
+
+
+def alert_server_down(server_name: str):
+    """Alert when server goes down (no crash keywords found = normal shutdown/restart)"""
+    send_webhook(
+        title=f"🔄 RESTART: {server_name.upper()}",
+        description="Server restarting (normal game end or manual restart)",
+        color=0x3498DB,  # Blue
+        fields=[
+            {"name": "Type", "value": "Normal restart", "inline": True},
+            {"name": "Time", "value": datetime.now().strftime("%H:%M:%S"), "inline": True},
+        ],
+        server_name=server_name
+    )
+
+
+def alert_server_up(server_name: str, was_crash: bool = False):
+    """Alert when server comes back online"""
+    if was_crash:
+        description = "Server recovered from crash!"
+        title = f"🟢 RECOVERED: {server_name.upper()}"
+    else:
+        description = "Server is back online!"
+        title = f"🟢 SERVER UP: {server_name.upper()}"
+    
+    send_webhook(
+        title=title,
+        description=description,
+        color=0x00FF00,  # Green
+        fields=[
+            {"name": "Time", "value": datetime.now().strftime("%H:%M:%S"), "inline": True},
+        ],
+        server_name=server_name
+    )
+
+
+# =============================================================================
+# Monitoring functions
+# =============================================================================
+
+def scan_logs_for_crashes(container, lines: int = LOG_SCAN_LINES) -> Optional[tuple]:
+    """
+    Scan recent container logs for crash keywords.
+    Returns (crash_line, keyword) if found, None otherwise.
+    """
+    logs = None
+    try:
+        logs = container.logs(tail=lines).decode('utf-8', errors='replace')
+        
+        for line in logs.split('\n'):
+            line_lower = line.lower()
+            for keyword in CRASH_KEYWORDS:
+                if keyword.lower() in line_lower:
+                    return (line.strip(), keyword)
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error scanning logs: {e}")
+        return None
+    finally:
+        # Explicit cleanup to prevent memory buildup
+        if logs is not None:
+            del logs
+
+
+def monitor_servers():
+    """Main monitoring loop"""
+    client = docker.from_env()
+    logger.info("Starting crash monitor...")
+    logger.info(f"Monitoring servers: {', '.join(SERVERS.keys())}")
+    logger.info(f"Crash keywords: {CRASH_KEYWORDS}")
+    logger.info(f"Check interval: {CHECK_INTERVAL}s")
+    
+    # Simple state tracking - fixed size dict, no growth over time
+    # Each server has exactly these keys, nothing gets appended
+    server_states = {
+        name: {
+            'status': None,           # Current container status
+            'last_alert': None,       # Datetime of last alert (for cooldown)
+            'last_crash_line': None,  # Last crash line seen (for dedup)
+            'was_crash': False,       # Was last down event a crash?
+        }
+        for name in SERVERS.keys()
+    }
+    
+    # Send startup notification
+    send_webhook(
+        title="🤖 Crash Monitor Started",
+        description="Watching for crashes and restarts",
+        color=0x2ECC71,  # Green
+        fields=[
+            {"name": "Servers", "value": ", ".join(SERVERS.keys()), "inline": False},
+            {"name": "Crash Keywords", "value": ", ".join(CRASH_KEYWORDS), "inline": False},
+            {"name": "Check Interval", "value": f"{CHECK_INTERVAL} seconds", "inline": True},
+        ]
+    )
+    
+    loop_count = 0
+    
+    while True:
+        try:
+            for server_name, container_id in SERVERS.items():
+                state = server_states[server_name]
+                container = None
+                
+                try:
+                    container = client.containers.get(container_id)
+                    current_status = container.status
+                    prev_status = state['status']
+                    
+                    # === STATUS CHANGE: Server went DOWN ===
+                    if prev_status == "running" and current_status != "running":
+                        logger.info(f"{server_name}: Server went DOWN ({prev_status} -> {current_status})")
+                        
+                        # Check if it was a crash
+                        crash_info = scan_logs_for_crashes(container)
+                        
+                        if crash_info:
+                            crash_line, keyword = crash_info
+                            # Avoid duplicate crash alerts
+                            if state['last_crash_line'] != crash_line:
+                                alert_crash(server_name, crash_line, keyword)
+                                state['last_crash_line'] = crash_line
+                                state['was_crash'] = True
+                                logger.warning(f"CRASH on {server_name}: {keyword}")
+                        else:
+                            # Normal shutdown/restart
+                            alert_server_down(server_name)
+                            state['was_crash'] = False
+                            logger.info(f"{server_name}: Normal restart detected")
+                        
+                        state['last_alert'] = datetime.now()
+                    
+                    # === STATUS CHANGE: Server came UP ===
+                    elif prev_status is not None and prev_status != "running" and current_status == "running":
+                        logger.info(f"{server_name}: Server came UP ({prev_status} -> {current_status})")
+                        alert_server_up(server_name, was_crash=state['was_crash'])
+                        state['was_crash'] = False
+                        state['last_crash_line'] = None  # Reset crash tracking
+                        state['last_alert'] = datetime.now()
+                    
+                    # === RUNNING: Check for crash keywords while still running ===
+                    # (server might log crash but still show running briefly before dying)
+                    elif current_status == "running":
+                        crash_info = scan_logs_for_crashes(container, lines=50)
+                        if crash_info:
+                            crash_line, keyword = crash_info
+                            # Check cooldown and dedup
+                            can_alert = True
+                            if state['last_alert']:
+                                elapsed = (datetime.now() - state['last_alert']).total_seconds()
+                                can_alert = elapsed > ALERT_COOLDOWN
+                            
+                            if can_alert and state['last_crash_line'] != crash_line:
+                                alert_crash(server_name, crash_line, keyword)
+                                state['last_crash_line'] = crash_line
+                                state['last_alert'] = datetime.now()
+                                state['was_crash'] = True
+                                logger.warning(f"CRASH DETECTED on {server_name}: {keyword}")
+                    
+                    # Update status
+                    state['status'] = current_status
+                    
+                except docker.errors.NotFound:
+                    if state['status'] != 'not_found':
+                        logger.warning(f"{server_name}: Container not found!")
+                    state['status'] = 'not_found'
+                except Exception as e:
+                    logger.error(f"Error checking {server_name}: {e}")
+                finally:
+                    # Explicit cleanup
+                    if container is not None:
+                        del container
+            
+            # Periodic garbage collection to prevent any memory buildup
+            loop_count += 1
+            if loop_count >= 60:  # Every ~30 minutes (60 loops * 30 seconds)
+                gc.collect()
+                loop_count = 0
+                logger.debug("Performed garbage collection")
+            
+            time.sleep(CHECK_INTERVAL)
+            
+        except KeyboardInterrupt:
+            logger.info("Shutting down crash monitor...")
+            send_webhook(
+                title="🛑 Crash Monitor Stopped",
+                description="Monitor has been shut down",
+                color=0x95A5A6  # Gray
+            )
+            break
+        except Exception as e:
+            logger.error(f"Monitor loop error: {e}")
+            time.sleep(CHECK_INTERVAL)
+
+
+# =============================================================================
+# Main entry point
+# =============================================================================
+
+if __name__ == "__main__":
+    monitor_servers()
