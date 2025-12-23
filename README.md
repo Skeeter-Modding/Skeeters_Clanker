@@ -15,9 +15,9 @@ Discord bot and crash monitor for Triple Threat Tactical Arma Reforger servers.
 
 | Server | Port | Container Name | Container ID |
 |--------|------|----------------|--------------|
-| TTT1 | 2002 | ub1d584ced | `17cc430c9c22...` |
-| TTT2 | 2001 | u98fbb3f3c | `b8f4323f2161...` |
-| TTT3 | 2003 | uf74498006 | `1b90e3689daf...` |
+| TTT1 |  |  | `...` |
+| TTT2 |  |  | `...` |
+| TTT3 |  |  | `...` |
 
 ⚠️ **Container IDs change when containers are recreated!** Update both `bot.py` and `crash_monitor.py` when this happens.
 
