@@ -45,21 +45,22 @@ Both libraries work, but for your use case:
 beserver.cfg or beserver_x64.cfg (Arma 3 paths)
 ```
 
-**CORRECT for Arma Reforger:**
+**CORRECT for Arma Reforger (✅ VERIFIED):**
 ```
-/srv/armareforger/[container_id]/profile/BattlEye/BEServer.cfg
+/srv/armareforger/[container_id]/battleye/BEServer.cfg
 ```
+**Note:** Lowercase `battleye`, no `/profile/` subdirectory!
 
 For your servers:
 ```bash
 # TTT1
-/srv/armareforger/ub1d584ced/profile/BattlEye/BEServer.cfg
+/srv/armareforger/ub1d584ced/battleye/BEServer.cfg
 
 # TTT2
-/srv/armareforger/uf74498006/profile/BattlEye/BEServer.cfg
+/srv/armareforger/uf74498006/battleye/BEServer.cfg
 
 # TTT3
-/srv/armareforger/u98fbb3f3c/profile/BattlEye/BEServer.cfg
+/srv/armareforger/u98fbb3f3c/battleye/BEServer.cfg
 ```
 
 ### 2. Configuration Format
@@ -178,11 +179,13 @@ From analyzing your codebase:
 Before implementing RCon, verify:
 
 ### 1. Check if BEServer.cfg Exists
+
+**✅ CORRECTED PATH (verified):**
 ```bash
-# Check each server
-ls -la /srv/armareforger/ub1d584ced/profile/BattlEye/
-ls -la /srv/armareforger/uf74498006/profile/BattlEye/
-ls -la /srv/armareforger/u98fbb3f3c/profile/BattlEye/
+# Check each server (lowercase 'battleye', no '/profile/')
+ls -la /srv/armareforger/ub1d584ced/battleye/
+ls -la /srv/armareforger/uf74498006/battleye/
+ls -la /srv/armareforger/u98fbb3f3c/battleye/
 ```
 
 **Expected output:**
